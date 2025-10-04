@@ -393,7 +393,7 @@ def main():
             fix_len = st.checkbox("Fix edge length during growth", value=True)
             edge_len_px = st.slider("Edge length (px)", 50, 300, 120, 10)
             # Zoom controls (scales the view without changing positions)
-            zoom_pct = st.slider("Zoom (%)", 50, 300, 100, 10)
+            zoom_pct = st.slider("Zoom (%)", 1, 200, 50, 10)
             # Bias constant control for attachment probability
             bias_c = st.number_input("Attachment bias constant (c)", min_value=0.0, value=0.0, step=0.5)
             st.session_state["growth_bias_c"] = float(bias_c)
