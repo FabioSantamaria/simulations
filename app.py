@@ -112,8 +112,8 @@ def main():
 
     with st.sidebar:
         st.header("Parameters")
-        n = st.slider("Nodes (n)", min_value=10, max_value=2000, value=300, step=10)
-        m = st.slider("Connections per node (m)", min_value=1, max_value=min(50, n - 1), value=8)
+        n = st.slider("Nodes (n)", min_value=1, max_value=1000, value=100, step=10)
+        m = st.slider("Connections per node (m)", min_value=1, max_value=min(50, n - 1), value=4)
 
         model = st.selectbox(
             "Model",
