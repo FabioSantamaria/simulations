@@ -67,33 +67,69 @@ def graph_metrics(G: nx.Graph) -> Tuple[int, int, float, float, int, float | Non
     return n, e, avg_deg, clustering, components, apl
 
 
-def render_pyvis(G: nx.Graph, height_px: int, physics: bool, dark: bool, pos: dict | None = None) -> str:
+def render_pyvis(G: nx.Graph, height_px: int, physics: bool, dark: bool, pos: dict | None = None, fixed_length_px: int | None = None, canvas_size_px: int | None = None) -> str:
     bg = "#0f1116" if dark else "#ffffff"
     font = "#e0e0e0" if dark else "#2b2b2b"
-    net = Network(height=f"{height_px}px", width="100%", notebook=False, bgcolor=bg, font_color=font)
-
-    # If explicit positions are provided, fix nodes there and disable physics
-    if pos is not None:
-        net.set_options("""
-{
-  "physics": { "enabled": false },
-  "interaction": { "hover": true }
-}
-        """)
-        # Scale positions to canvas coordinates
-        scale = max(300, min(900, height_px - 100))
+    if canvas_size_px is not None:
+        net = Network(height=f"{canvas_size_px}px", width=f"{canvas_size_px}px", notebook=False, bgcolor=bg, font_color=font)
     else:
-        # Improve layout stability for medium/large graphs (client-side physics)
-        if physics:
-            net.barnes_hut(gravity=-5000, central_gravity=0.2, spring_length=120, spring_strength=0.05, damping=0.9)
-        else:
+        net = Network(height=f"{height_px}px", width="100%", notebook=False, bgcolor=bg, font_color=font)
+
+    # Configure physics/layout: optionally enforce a fixed edge length and non-overlap
+    if fixed_length_px is not None:
+        # Use physics with a target spring length and node distance to reduce overlap
+        net.set_options(f"""
+{{
+  "physics": {{
+    "enabled": true,
+    "solver": "repulsion",
+    "repulsion": {{
+      "nodeDistance": {fixed_length_px},
+      "springLength": {fixed_length_px},
+      "springConstant": 0.01,
+      "damping": 0.09
+    }},
+    "minVelocity": 0.1,
+    "stabilization": {{ "enabled": true, "fit": false, "iterations": 40 }}
+  }},
+  "layout": {{ "improvedLayout": false }},
+  "edges": {{ "length": {fixed_length_px} }},
+  "interaction": {{ "hover": true }}
+}}
+        """)
+        scale = None
+    else:
+        # If explicit positions are provided, fix nodes there and disable physics
+        if pos is not None:
             net.set_options("""
 {
   "physics": { "enabled": false },
+  "layout": { "improvedLayout": false },
   "interaction": { "hover": true }
 }
             """)
-        scale = None
+            # Scale positions to canvas coordinates
+            base_size = canvas_size_px if canvas_size_px is not None else height_px
+            scale = max(300, min(1200, base_size - 80))
+        else:
+            # Improve layout stability for medium/large graphs (client-side physics)
+            if physics:
+                net.barnes_hut(gravity=-5000, central_gravity=0.2, spring_length=120, spring_strength=0.05, damping=0.9)
+                net.set_options("""
+{
+  "layout": { "improvedLayout": false },
+  "interaction": { "hover": true }
+}
+                """)
+            else:
+                net.set_options("""
+{
+  "physics": { "enabled": false },
+  "layout": { "improvedLayout": false },
+  "interaction": { "hover": true }
+}
+                """)
+            scale = None
 
     # Map nodes with degree-based color
     degrees = dict(G.degree())
@@ -109,7 +145,7 @@ def render_pyvis(G: nx.Graph, height_px: int, physics: bool, dark: bool, pos: di
 
     for node in G.nodes():
         d = degrees.get(node, 0)
-        if pos is not None and node in pos:
+        if pos is not None and node in pos and fixed_length_px is None:
             x = int(pos[node][0] * (scale or height_px))
             y = int(pos[node][1] * (scale or height_px))
             net.add_node(
@@ -130,7 +166,10 @@ def render_pyvis(G: nx.Graph, height_px: int, physics: bool, dark: bool, pos: di
             )
 
     for u, v in G.edges():
-        net.add_edge(u, v)
+        if fixed_length_px is not None:
+            net.add_edge(u, v, length=fixed_length_px)
+        else:
+            net.add_edge(u, v)
 
     # Return HTML string to embed in Streamlit
     return net.generate_html()  # pyvis >=0.3.2
@@ -191,12 +230,16 @@ def add_one_node_preferential(G: nx.Graph, new_node_id: int) -> None:
     G.add_node(new_node_id)
     existing = [u for u in G.nodes() if u != new_node_id]
     degs = np.array([G.degree(u) for u in existing], dtype=float)
-    total = float(degs.sum())
+    # Use degree + bias constant; clamp negatives
+    bias_c = float(st.session_state.get("growth_bias_c", 0.0)) if "growth_bias_c" in st.session_state else 0.0
+    weights = np.clip(degs + bias_c, a_min=0.0, a_max=None)
+    total = float(weights.sum())
+    rng = np.random.default_rng()
     if total <= 0.0:
-        target = int(np.random.default_rng().choice(existing))
+        target = int(rng.choice(existing))
     else:
-        probs = degs / total
-        target = int(np.random.default_rng().choice(existing, p=probs))
+        probs = weights / total
+        target = int(rng.choice(existing, p=probs))
     G.add_edge(new_node_id, target)
 
 
@@ -228,7 +271,7 @@ def main():
         if model == "Preferential growth (1 edge/time)":
             initial_n = st.slider("Initial nodes (n0)", min_value=1, max_value=min(100, n), value=min(10, n))
             max_m0 = (initial_n * (initial_n - 1)) // 2
-            m = st.slider("Initial edges (m0)", min_value=0, max_value=max_m0, value=min(2, max_m0))
+            m = st.slider("Initial edges (m0)", min_value=0, max_value=max_m0, value=min(10, max_m0))
             c1, c2 = st.columns(2)
             with c1:
                 init_clicked = st.button("Initialize growth", use_container_width=True)
@@ -336,10 +379,27 @@ def main():
     with col2:
         st.subheader("Visualization")
         if model == "Preferential growth (1 edge/time)":
-            html = render_pyvis(G, height_px=height_px, physics=False, dark=dark, pos=st.session_state.get("pos_growth"))
+            # Optional fixed edge length controls
+            fix_len = st.checkbox("Fix edge length during growth", value=True)
+            edge_len_px = st.slider("Edge length (px)", 50, 300, 120, 10)
+            # Square canvas controls
+            square_canvas = st.checkbox("Use square canvas size", value=True)
+            canvas_px = st.slider("Canvas size (px)", 400, 1200, 800, 50)
+            # Bias constant control for attachment probability
+            bias_c = st.number_input("Attachment bias constant (c)", min_value=0.0, value=0.0, step=0.5)
+            st.session_state["growth_bias_c"] = float(bias_c)
+            html = render_pyvis(
+                G,
+                height_px=height_px,
+                physics=not fix_len,
+                dark=dark,
+                pos=st.session_state.get("pos_growth"),
+                fixed_length_px=edge_len_px if fix_len else None,
+                canvas_size_px=canvas_px if square_canvas else None,
+            )
         else:
-            html = render_pyvis(G, height_px=height_px, physics=physics, dark=dark, pos=None)
-        st.components.v1.html(html, height=height_px, scrolling=True)
+            html = render_pyvis(G, height_px=height_px, physics=physics, dark=dark, pos=None, fixed_length_px=None, canvas_size_px=None)
+        st.components.v1.html(html, height=(canvas_px if model == "Preferential growth (1 edge/time)" and square_canvas else height_px), scrolling=True)
 
 
 if __name__ == "__main__":
