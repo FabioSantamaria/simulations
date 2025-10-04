@@ -67,7 +67,7 @@ def graph_metrics(G: nx.Graph) -> Tuple[int, int, float, float, int, float | Non
     return n, e, avg_deg, clustering, components, apl
 
 
-def render_pyvis(G: nx.Graph, height_px: int, physics: bool, dark: bool, pos: dict | None = None, fixed_length_px: int | None = None, canvas_size_px: int | None = None) -> str:
+def render_pyvis(G: nx.Graph, height_px: int, physics: bool, dark: bool, pos: dict | None = None, fixed_length_px: int | None = None, canvas_size_px: int | None = None, zoom_scale: float | None = None) -> str:
     bg = "#0f1116" if dark else "#ffffff"
     font = "#e0e0e0" if dark else "#2b2b2b"
     if canvas_size_px is not None:
@@ -171,8 +171,18 @@ def render_pyvis(G: nx.Graph, height_px: int, physics: bool, dark: bool, pos: di
         else:
             net.add_edge(u, v)
 
-    # Return HTML string to embed in Streamlit
-    return net.generate_html()  # pyvis >=0.3.2
+    # Return HTML string to embed in Streamlit, with optional initial zoom
+    html = net.generate_html()  # pyvis >=0.3.2
+    if zoom_scale is not None:
+        try:
+            scale_js = max(0.1, min(5.0, float(zoom_scale) / 100.0))
+            html = html.replace(
+                "</body>",
+                f"<script>try{{network.moveTo({{scale:{scale_js}}});}}catch(e){{}}</script></body>",
+            )
+        except Exception:
+            pass
+    return html
 
 
 def preferential_growth_graph(n_total: int, n0: int, m0: int, seed: int) -> nx.Graph:
@@ -382,9 +392,8 @@ def main():
             # Optional fixed edge length controls
             fix_len = st.checkbox("Fix edge length during growth", value=True)
             edge_len_px = st.slider("Edge length (px)", 50, 300, 120, 10)
-            # Square canvas controls
-            square_canvas = st.checkbox("Use square canvas size", value=True)
-            canvas_px = st.slider("Canvas size (px)", 400, 1200, 800, 50)
+            # Zoom controls (scales the view without changing positions)
+            zoom_pct = st.slider("Zoom (%)", 50, 300, 100, 10)
             # Bias constant control for attachment probability
             bias_c = st.number_input("Attachment bias constant (c)", min_value=0.0, value=0.0, step=0.5)
             st.session_state["growth_bias_c"] = float(bias_c)
@@ -395,11 +404,12 @@ def main():
                 dark=dark,
                 pos=st.session_state.get("pos_growth"),
                 fixed_length_px=edge_len_px if fix_len else None,
-                canvas_size_px=canvas_px if square_canvas else None,
+                canvas_size_px=None,
+                zoom_scale=zoom_pct,
             )
         else:
-            html = render_pyvis(G, height_px=height_px, physics=physics, dark=dark, pos=None, fixed_length_px=None, canvas_size_px=None)
-        st.components.v1.html(html, height=(canvas_px if model == "Preferential growth (1 edge/time)" and square_canvas else height_px), scrolling=True)
+            html = render_pyvis(G, height_px=height_px, physics=physics, dark=dark, pos=None, fixed_length_px=None, canvas_size_px=None, zoom_scale=None)
+        st.components.v1.html(html, height=height_px, scrolling=True)
 
 
 if __name__ == "__main__":
