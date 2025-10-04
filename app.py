@@ -8,7 +8,7 @@ from typing import Tuple
 st.set_page_config(page_title="Network Simulator", layout="wide")
 
 
-def generate_graph(model: str, n: int, m: int, regularity: float, seed: int) -> nx.Graph:
+def generate_graph(model: str, n: int, m: int, regularity: float, seed: int, initial_n: int | None = None) -> nx.Graph:
     if n < 2:
         return nx.empty_graph(n)
 
@@ -39,6 +39,11 @@ def generate_graph(model: str, n: int, m: int, regularity: float, seed: int) -> 
         m_ba = max(1, min(m, n - 1))
         return nx.barabasi_albert_graph(n=n, m=m_ba, seed=seed)
 
+    if model == "Preferential growth (1 edge/time)":
+        n0 = initial_n if initial_n is not None else max(2, min(10, n))
+        m0 = max(0, min(m, (n0 * (n0 - 1)) // 2))
+        return preferential_growth_graph(n_total=n, n0=n0, m0=m0, seed=seed)
+
     # Fallback: simple ring lattice with m nearest neighbors (even m)
     k = m if m % 2 == 0 else m - 1
     k = max(2, k)
@@ -62,21 +67,33 @@ def graph_metrics(G: nx.Graph) -> Tuple[int, int, float, float, int, float | Non
     return n, e, avg_deg, clustering, components, apl
 
 
-def render_pyvis(G: nx.Graph, height_px: int, physics: bool, dark: bool) -> str:
+def render_pyvis(G: nx.Graph, height_px: int, physics: bool, dark: bool, pos: dict | None = None) -> str:
     bg = "#0f1116" if dark else "#ffffff"
     font = "#e0e0e0" if dark else "#2b2b2b"
     net = Network(height=f"{height_px}px", width="100%", notebook=False, bgcolor=bg, font_color=font)
 
-    # Improve layout stability for medium/large graphs
-    if physics:
-        net.barnes_hut(gravity=-5000, central_gravity=0.2, spring_length=120, spring_strength=0.05, damping=0.9)
-    else:
+    # If explicit positions are provided, fix nodes there and disable physics
+    if pos is not None:
         net.set_options("""
 {
   "physics": { "enabled": false },
   "interaction": { "hover": true }
 }
         """)
+        # Scale positions to canvas coordinates
+        scale = max(300, min(900, height_px - 100))
+    else:
+        # Improve layout stability for medium/large graphs (client-side physics)
+        if physics:
+            net.barnes_hut(gravity=-5000, central_gravity=0.2, spring_length=120, spring_strength=0.05, damping=0.9)
+        else:
+            net.set_options("""
+{
+  "physics": { "enabled": false },
+  "interaction": { "hover": true }
+}
+            """)
+        scale = None
 
     # Map nodes with degree-based color
     degrees = dict(G.degree())
@@ -92,12 +109,25 @@ def render_pyvis(G: nx.Graph, height_px: int, physics: bool, dark: bool) -> str:
 
     for node in G.nodes():
         d = degrees.get(node, 0)
-        net.add_node(
-            node,
-            label=str(node),
-            title=f"Node {node} | degree {d}",
-            color=color_for_degree(d),
-        )
+        if pos is not None and node in pos:
+            x = int(pos[node][0] * (scale or height_px))
+            y = int(pos[node][1] * (scale or height_px))
+            net.add_node(
+                node,
+                label=str(node),
+                title=f"Node {node} | degree {d}",
+                color=color_for_degree(d),
+                x=x,
+                y=y,
+                physics=False,
+            )
+        else:
+            net.add_node(
+                node,
+                label=str(node),
+                title=f"Node {node} | degree {d}",
+                color=color_for_degree(d),
+            )
 
     for u, v in G.edges():
         net.add_edge(u, v)
@@ -106,14 +136,81 @@ def render_pyvis(G: nx.Graph, height_px: int, physics: bool, dark: bool) -> str:
     return net.generate_html()  # pyvis >=0.3.2
 
 
+def preferential_growth_graph(n_total: int, n0: int, m0: int, seed: int) -> nx.Graph:
+    rng = np.random.default_rng(seed)
+    n0 = max(1, min(n0, n_total))
+    G = nx.Graph()
+    G.add_nodes_from(range(n0))
+
+    # Initialize with m0 random edges among initial nodes (no duplicates/self-loops)
+    possible = [(i, j) for i in range(n0) for j in range(i + 1, n0)]
+    rng.shuffle(possible)
+    for (u, v) in possible[:min(m0, len(possible))]:
+        G.add_edge(u, v)
+
+    # Grow: each new node connects to one existing node proportional to degree
+    for new_node in range(n0, n_total):
+        G.add_node(new_node)
+        existing = list(range(new_node))
+        degs = np.array([G.degree(u) for u in existing], dtype=float)
+        total = float(degs.sum())
+        if total <= 0.0:
+            target = int(rng.choice(existing))
+        else:
+            probs = degs / total
+            target = int(rng.choice(existing, p=probs))
+        G.add_edge(new_node, target)
+
+    return G
+
+
+def compute_layout(G: nx.Graph, prev_pos: dict | None, seed: int) -> dict:
+    # Compute spring layout, reusing previous positions for continuity
+    try:
+        pos = nx.spring_layout(G, seed=seed, pos=prev_pos, iterations=30)
+    except Exception:
+        pos = nx.spring_layout(G, seed=seed)
+    return pos
+
+
+def build_initial_growth_graph(n0: int, m0: int, seed: int) -> nx.Graph:
+    # Create only the initial graph with n0 nodes and m0 edges
+    rng = np.random.default_rng(seed)
+    n0 = max(1, n0)
+    G = nx.Graph()
+    G.add_nodes_from(range(n0))
+    possible = [(i, j) for i in range(n0) for j in range(i + 1, n0)]
+    rng.shuffle(possible)
+    for (u, v) in possible[:min(m0, len(possible))]:
+        G.add_edge(u, v)
+    return G
+
+
+def add_one_node_preferential(G: nx.Graph, new_node_id: int) -> None:
+    # Add a single node that attaches to one existing node with probability ∝ degree
+    G.add_node(new_node_id)
+    existing = [u for u in G.nodes() if u != new_node_id]
+    degs = np.array([G.degree(u) for u in existing], dtype=float)
+    total = float(degs.sum())
+    if total <= 0.0:
+        target = int(np.random.default_rng().choice(existing))
+    else:
+        probs = degs / total
+        target = int(np.random.default_rng().choice(existing, p=probs))
+    G.add_edge(new_node_id, target)
+
+
 def main():
     st.title("Network Simulation and Visualization")
     st.caption("Explore regular vs random connectivity and emergent properties.")
 
+    # For interactive growth mode buttons
+    init_clicked = False
+    add_clicked = False
+
     with st.sidebar:
         st.header("Parameters")
-        n = st.slider("Nodes (n)", min_value=1, max_value=1000, value=100, step=10)
-        m = st.slider("Connections per node (m)", min_value=1, max_value=min(50, n - 1), value=4)
+        n = st.slider("Final nodes (n)", min_value=1, max_value=1000, value=100, step=10)
 
         model = st.selectbox(
             "Model",
@@ -122,8 +219,27 @@ def main():
                 "Random regular (degree = m)",
                 "Erdős–Rényi (avg degree ≈ m)",
                 "Barabási–Albert (attach m edges)",
+                "Preferential growth (1 edge/time)",
             ],
         )
+
+        # Model-specific controls
+        initial_n = None
+        if model == "Preferential growth (1 edge/time)":
+            initial_n = st.slider("Initial nodes (n0)", min_value=1, max_value=min(100, n), value=min(10, n))
+            max_m0 = (initial_n * (initial_n - 1)) // 2
+            m = st.slider("Initial edges (m0)", min_value=0, max_value=max_m0, value=min(2, max_m0))
+            c1, c2 = st.columns(2)
+            with c1:
+                init_clicked = st.button("Initialize growth", use_container_width=True)
+            with c2:
+                add_clicked = st.button("Add one node", use_container_width=True)
+        elif model == "Watts–Strogatz (regularity)":
+            m = st.slider("Nearest neighbors (m)", min_value=2, max_value=min(50, n - 1), value=4)
+        elif model in ("Random regular (degree = m)", "Barabási–Albert (attach m edges)"):
+            m = st.slider("Connections per node (m)", min_value=1, max_value=min(50, n - 1), value=4)
+        else:
+            m = st.slider("Target avg degree (m)", min_value=1, max_value=min(50, n - 1), value=4)
 
         reg = 0.8
         if model == "Watts–Strogatz (regularity)":
@@ -135,11 +251,37 @@ def main():
         height_px = st.slider("Canvas height (px)", 300, 1000, 650, 50)
 
         st.divider()
-        st.caption("Tip: For WS, ensure m is even for ring lattice.")
+        if model == "Watts–Strogatz (regularity)":
+            st.caption("Tip: For WS, ensure m is even for ring lattice.")
+        if model == "Preferential growth (1 edge/time)":
+            st.caption("Each new node connects to one existing node with probability ∝ degree.")
 
-    # Generate graph
+    # Generate or update graph
     try:
-        G = generate_graph(model=model, n=n, m=m, regularity=reg, seed=seed)
+        if model == "Preferential growth (1 edge/time)":
+            # Initialize growth state
+            if init_clicked or "G_growth" not in st.session_state:
+                st.session_state["G_growth"] = build_initial_growth_graph(n0=initial_n, m0=m, seed=seed)
+                st.session_state["growth_next"] = initial_n
+                st.session_state["final_n"] = n
+                # initial layout
+                st.session_state["pos_growth"] = compute_layout(st.session_state["G_growth"], prev_pos=None, seed=seed)
+
+            # Add one node if requested and capacity remains
+            if add_clicked:
+                next_id = st.session_state.get("growth_next", initial_n)
+                final_n = st.session_state.get("final_n", n)
+                if next_id >= final_n:
+                    st.info("Reached target number of nodes.")
+                else:
+                    add_one_node_preferential(st.session_state["G_growth"], new_node_id=next_id)
+                    # recompute layout with previous positions for smoothness
+                    st.session_state["pos_growth"] = compute_layout(st.session_state["G_growth"], prev_pos=st.session_state.get("pos_growth"), seed=seed)
+                    st.session_state["growth_next"] = next_id + 1
+
+            G = st.session_state["G_growth"]
+        else:
+            G = generate_graph(model=model, n=n, m=m, regularity=reg, seed=seed, initial_n=initial_n)
     except Exception as e:
         st.error(f"Error generating graph: {e}")
         return
@@ -188,10 +330,15 @@ def main():
             st.caption(f"ER: edge probability p≈{p_eff:.4f}; expected average degree ≈ m, not exact")
         elif model == "Barabási–Albert (attach m edges)":
             st.caption("BA: new nodes attach m edges; degrees are skewed with hubs; min degree ≥ m")
+        elif model == "Preferential growth (1 edge/time)":
+            st.caption("Preferential growth: start with n0 nodes, m0 edges; each new node attaches to an existing node with probability proportional to its degree.")
 
     with col2:
         st.subheader("Visualization")
-        html = render_pyvis(G, height_px=height_px, physics=physics, dark=dark)
+        if model == "Preferential growth (1 edge/time)":
+            html = render_pyvis(G, height_px=height_px, physics=False, dark=dark, pos=st.session_state.get("pos_growth"))
+        else:
+            html = render_pyvis(G, height_px=height_px, physics=physics, dark=dark, pos=None)
         st.components.v1.html(html, height=height_px, scrolling=True)
 
 
