@@ -160,10 +160,34 @@ def main():
         else:
             st.caption("Avg path length unavailable for large or disconnected graphs.")
 
-        # Degree distribution preview
+        # Degree distribution (exact counts per integer degree)
         degs = [d for _, d in G.degree()]
-        hist, _ = np.histogram(degs, bins=min(30, int(np.sqrt(max(1, len(degs))))))
-        st.bar_chart(hist)
+        if degs:
+            max_d = max(degs)
+            counts = np.bincount(degs, minlength=max_d + 1)
+            import pandas as pd
+            df_deg = pd.DataFrame({"degree": np.arange(len(counts)), "count": counts})
+            st.bar_chart(df_deg.set_index("degree"))
+        else:
+            st.caption("No degree data available.")
+
+        # Model parameters summary for clarity
+        st.divider()
+        if model == "Watts–Strogatz (regularity)":
+            k_eff = m if m % 2 == 0 else max(2, m - 1)
+            p_eff = float(max(0.0, min(1.0, 1.0 - reg)))
+            st.caption(f"WS effective k={k_eff}, rewiring p={p_eff:.2f} (degrees vary around k when p>0)")
+        elif model == "Random regular (degree = m)":
+            m_eff = m
+            if (n * m) % 2 == 1:
+                m_eff = m + 1 if m + 1 < n else m - 1
+            st.caption(f"Random regular: enforced degree d={m_eff} for all nodes")
+        elif model == "Erdős–Rényi (avg degree ≈ m)":
+            p_eff = float(m) / float(max(1, n - 1))
+            p_eff = float(max(0.0, min(1.0, p_eff)))
+            st.caption(f"ER: edge probability p≈{p_eff:.4f}; expected average degree ≈ m, not exact")
+        elif model == "Barabási–Albert (attach m edges)":
+            st.caption("BA: new nodes attach m edges; degrees are skewed with hubs; min degree ≥ m")
 
     with col2:
         st.subheader("Visualization")
